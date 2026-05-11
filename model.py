@@ -509,7 +509,7 @@ class Transformer(nn.Module):
 
         # ── Load checkpoint from Google Drive (autograder hook) ───────
         if checkpoint_path is not None:
-            if self.GDRIVE_FILE_ID == "YOUR_GDRIVE_FILE_ID_HERE":
+            if self.GDRIVE_FILE_ID == "1PaDQYumIxFbtZF8mkLaI8J0c5Gd99hxM":
                 raise ValueError(
                     "Set Transformer.GDRIVE_FILE_ID to your Drive file ID "
                     "before the autograder can download the checkpoint."
