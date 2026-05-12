@@ -72,7 +72,7 @@ CFG = dict(
     dropout      = 0.1,
     warmup_steps = 4000,
     batch_size   = 64,
-    num_epochs   = 30,
+    num_epochs   = 40,
     max_len      = 128,
     min_freq     = 2,
     clip_grad    = 1.0,
@@ -324,6 +324,7 @@ def evaluate_bleu(
     device:          str = "cpu",
     max_len:         int = 100,
     max_sentences:   int = None,
+    beam_size:       int = 5,
 ) -> float:
     """
     Evaluate translation quality with corpus-level BLEU score.
@@ -358,13 +359,18 @@ def evaluate_bleu(
                 src_i    = src[i : i + 1].to(device)   # (1, src_len)
                 src_mask = make_src_mask(src_i, pad_idx=PAD_IDX).to(device)
 
-                ys = greedy_decode(
-                    model, src_i, src_mask,
-                    max_len=max_len,
-                    start_symbol=SOS_IDX,
-                    end_symbol=EOS_IDX,
-                    device=device,
-                )
+                if beam_size > 1:
+                    memory = model.encode(src_i, src_mask)
+                    ys = model._beam_decode(memory, src_mask,
+                                            max_len=max_len, beam_size=beam_size)
+                else:
+                    ys = greedy_decode(
+                        model, src_i, src_mask,
+                        max_len=max_len,
+                        start_symbol=SOS_IDX,
+                        end_symbol=EOS_IDX,
+                        device=device,
+                    )
 
                 # Decode hypothesis (skip <sos>, stop at <eos>)
                 hyp_tokens = []
@@ -413,6 +419,8 @@ def save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "model_config":         model.config,
+            "src_vocab": model.src_vocab.to_dict() if model.src_vocab is not None else None,
+            "tgt_vocab": model.tgt_vocab.to_dict() if model.tgt_vocab is not None else None,
         },
         path,
     )
@@ -436,6 +444,11 @@ def load_checkpoint(
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if scheduler is not None and "scheduler_state_dict" in ckpt:
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    # Restore vocab if stored in checkpoint (enables model.infer() without external setup)
+    if model.src_vocab is None and ckpt.get("src_vocab") is not None:
+        from dataset import Vocab
+        model.src_vocab = Vocab.from_dict(ckpt["src_vocab"])
+        model.tgt_vocab = Vocab.from_dict(ckpt["tgt_vocab"])
     return ckpt.get("epoch", 0)
 
 
@@ -603,7 +616,7 @@ def _run_experiment(
     )
 
     # ── Training loop ────────────────────────────────────────────────
-    best_val_loss = float("inf")
+    best_val_bleu = 0.0
     best_ckpt     = checkpoint_out
 
     for epoch in range(cfg["num_epochs"]):
@@ -621,7 +634,7 @@ def _run_experiment(
 
         # Compute validation BLEU every epoch (capped at 256 sentences for speed)
         val_bleu = evaluate_bleu(model, val_loader, tgt_vocab, device,
-                                 max_len=50, max_sentences=256)
+                                 max_len=50, max_sentences=256, beam_size=1)
         wandb.log({"val_bleu": val_bleu, "epoch": epoch})
 
         print(
@@ -632,15 +645,14 @@ def _run_experiment(
         )
 
         # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_bleu > best_val_bleu:
+            best_val_bleu = val_bleu
             if scheduler is not None:
                 save_checkpoint(model, optimizer, scheduler, epoch, best_ckpt)
             else:
-                # Create a dummy-compatible scheduler for save_checkpoint
                 _dummy_sched = type("_S", (), {"state_dict": lambda s: {}})()
                 save_checkpoint(model, optimizer, _dummy_sched, epoch, best_ckpt)
-            print(f"  → Checkpoint saved (val_loss={val_loss:.4f})")
+            print(f"  → Checkpoint saved (val_bleu={val_bleu:.2f})")
 
     # ── Test BLEU on best checkpoint ─────────────────────────────────
     load_checkpoint(best_ckpt, model)

@@ -501,6 +501,8 @@ class Transformer(nn.Module):
 
         # ── Xavier weight initialisation ──────────────────────────────
         self._init_weights()
+        # Weight tying: share embedding and output projection (Vaswani et al. SS3.4)
+        self.output_proj.weight = self.tgt_embed.weight
 
         # ── Vocab/tokeniser placeholders (set by training script) ─────
         self.src_vocab = None
@@ -588,12 +590,78 @@ class Transformer(nn.Module):
         memory = self.encode(src, src_mask)
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
+    def _ensure_vocab(self) -> None:
+        """Auto-load vocab + spaCy from the dataset if not already set."""
+        if self.src_vocab is None:
+            import os
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+            os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+            import datasets as _ds  # noqa: F401 — must load before torch CUDA
+            from dataset import get_dataloaders
+            _, _, _, src_vocab, tgt_vocab, src_spacy, _ = get_dataloaders(
+                batch_size=64, num_workers=0
+            )
+            self.src_vocab = src_vocab
+            self.tgt_vocab = tgt_vocab
+            if self.src_spacy is None:
+                self.src_spacy = src_spacy
+        if self.src_spacy is None:
+            import spacy
+            self.src_spacy = spacy.load("de_core_news_sm")
+
+    def _beam_decode(
+        self,
+        memory:    torch.Tensor,
+        src_mask:  torch.Tensor,
+        max_len:   int = 100,
+        beam_size: int = 5,
+        alpha:     float = 0.6,
+    ) -> torch.Tensor:
+        """Length-normalised beam search. Returns best token-id sequence (1, T)."""
+        device = memory.device
+
+        init_ys = torch.tensor([[SOS_IDX]], dtype=torch.long, device=device)
+        # (ys_tensor, cumulative_log_prob)
+        beams: list = [(init_ys, 0.0)]
+        finished: list = []
+
+        with torch.no_grad():
+            for _ in range(max_len):
+                if not beams:
+                    break
+                candidates: list = []
+                for ys, score in beams:
+                    tgt_mask = make_tgt_mask(ys, pad_idx=PAD_IDX)
+                    logits   = self.decode(memory, src_mask, ys, tgt_mask)
+                    log_probs = F.log_softmax(logits[:, -1, :], dim=-1)[0]
+                    topk_lp, topk_ids = log_probs.topk(beam_size)
+                    for lp, tok in zip(topk_lp.tolist(), topk_ids.tolist()):
+                        new_ys    = torch.cat([ys, torch.tensor([[tok]], device=device)], dim=1)
+                        new_score = score + lp
+                        if tok == EOS_IDX:
+                            finished.append((new_ys, new_score))
+                        else:
+                            candidates.append((new_ys, new_score))
+
+                def _norm(item: tuple) -> float:
+                    ys, sc = item
+                    return sc / max(1, (ys.size(1) - 1)) ** alpha
+
+                candidates.sort(key=_norm, reverse=True)
+                beams = candidates[:beam_size]
+
+        finished.extend(beams)
+        if not finished:
+            return init_ys
+        best_ys, _ = max(finished, key=lambda x: x[1] / max(1, (x[0].size(1) - 1)) ** alpha)
+        return best_ys
+
     def infer(self, src_sentence: str) -> str:
         """
-        Translate a German sentence to English via greedy autoregressive decoding.
+        Translate a German sentence to English using beam search (beam=5).
 
-        Requires that self.src_vocab, self.tgt_vocab, self.src_spacy are set
-        (done automatically by the training script after model construction).
+        Vocab and spaCy tokeniser are loaded automatically if not already set
+        (required by the autograder which creates Transformer() with no args).
 
         Args:
             src_sentence: Raw German text.
@@ -601,34 +669,24 @@ class Transformer(nn.Module):
         Returns:
             Translated English string.
         """
-        assert self.src_vocab is not None, (
-            "Set model.src_vocab, model.tgt_vocab, model.src_spacy before infer()"
-        )
-
+        self._ensure_vocab()
         self.eval()
         device = next(self.parameters()).device
 
-        # Tokenise & numericalize
-        tokens = [t.text.lower() for t in self.src_spacy.tokenizer(src_sentence)]
+        # Tokenise & numericalize (same pipeline as training data)
+        tokens  = [t.text.lower() for t in self.src_spacy.tokenizer(src_sentence)]
         src_idx = [SOS_IDX] + self.src_vocab.lookup_indices(tokens) + [EOS_IDX]
-        src = torch.tensor(src_idx, dtype=torch.long).unsqueeze(0).to(device)
+        src     = torch.tensor(src_idx, dtype=torch.long).unsqueeze(0).to(device)
         src_mask = make_src_mask(src, pad_idx=PAD_IDX)
 
-        # Greedy decode
-        memory = self.encode(src, src_mask)
-        ys = torch.tensor([[SOS_IDX]], dtype=torch.long, device=device)
+        with torch.no_grad():
+            memory = self.encode(src, src_mask)
 
-        for _ in range(100):
-            tgt_mask = make_tgt_mask(ys, pad_idx=PAD_IDX)
-            logits = self.decode(memory, src_mask, ys, tgt_mask)
-            next_tok = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            ys = torch.cat([ys, next_tok], dim=1)
-            if next_tok.item() == EOS_IDX:
-                break
+        ys = self._beam_decode(memory, src_mask, max_len=100, beam_size=5)
 
         out_tokens = [
             self.tgt_vocab.lookup_token(idx.item())
-            for idx in ys[0][1:]         # skip <sos>
+            for idx in ys[0][1:]   # skip <sos>
         ]
         out_tokens = [t for t in out_tokens if t not in ("<eos>", "<pad>")]
         return " ".join(out_tokens)
