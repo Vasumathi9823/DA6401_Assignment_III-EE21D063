@@ -455,12 +455,12 @@ class Transformer(nn.Module):
     """
 
     # ── UPDATE this ID after uploading your trained checkpoint to Google Drive ──
-    GDRIVE_FILE_ID: str = "YOUR_GDRIVE_FILE_ID_HERE"
+    GDRIVE_FILE_ID: str = "1ZICakbwgqSBNftlYRyv9EiN4N9hslzrf"
 
     def __init__(
         self,
-        src_vocab_size: int,
-        tgt_vocab_size: int,
+        src_vocab_size: int   = 7853,
+        tgt_vocab_size: int   = 5893,
         d_model:        int   = 512,
         N:              int   = 6,
         num_heads:      int   = 8,
@@ -509,7 +509,7 @@ class Transformer(nn.Module):
 
         # ── Load checkpoint from Google Drive (autograder hook) ───────
         if checkpoint_path is not None:
-            if self.GDRIVE_FILE_ID == "1PaDQYumIxFbtZF8mkLaI8J0c5Gd99hxM":
+            if self.GDRIVE_FILE_ID == "YOUR_GDRIVE_FILE_ID_HERE":
                 raise ValueError(
                     "Set Transformer.GDRIVE_FILE_ID to your Drive file ID "
                     "before the autograder can download the checkpoint."
