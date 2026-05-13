@@ -636,52 +636,80 @@ class Transformer(nn.Module):
         self,
         memory:    torch.Tensor,
         src_mask:  torch.Tensor,
-        max_len:   int = 100,
-        beam_size: int = 5,
+        max_len:   int   = 50,
+        beam_size: int   = 4,
         alpha:     float = 0.6,
     ) -> torch.Tensor:
-        """Length-normalised beam search. Returns best token-id sequence (1, T)."""
-        device = memory.device
+        """
+        Batched beam search — all active beams decoded in a single forward pass per
+        step (batch_size = number of live beams).  Much faster than the sequential
+        version: O(max_len) decoder calls instead of O(max_len × beam_size).
 
-        init_ys = torch.tensor([[SOS_IDX]], dtype=torch.long, device=device)
-        # (ys_tensor, cumulative_log_prob)
-        beams: list = [(init_ys, 0.0)]
+        Length-normalised score: sum_log_prob / length^alpha  (Vaswani et al.)
+        Returns the best complete sequence as shape (1, T).
+        """
+        device = memory.device
+        V = self.output_proj.weight.size(0)   # target vocabulary size
+
+        # Expand encoder output for all beams: (beam, src_len, d_model)
+        mem   = memory.expand(beam_size, -1, -1).contiguous()
+        smask = src_mask.expand(beam_size, -1, -1, -1).contiguous()
+
+        seqs   = torch.full((beam_size, 1), SOS_IDX, dtype=torch.long, device=device)
+        scores = torch.zeros(beam_size, device=device)
         finished: list = []
 
-        with torch.no_grad():
-            for _ in range(max_len):
-                if not beams:
+        for step in range(max_len):
+            tgt_mask = make_tgt_mask(seqs, pad_idx=PAD_IDX)
+            logits   = self.decode(mem, smask, seqs, tgt_mask)       # (B, seq, V)
+            lp       = F.log_softmax(logits[:, -1, :], dim=-1)       # (B, V)
+
+            # Step 0: all beams identical — expand only from beam 0
+            all_sc = lp[0].unsqueeze(0) if step == 0 else scores.unsqueeze(1) + lp
+            flat   = all_sc.view(-1)
+            k      = min(2 * beam_size, flat.size(0))
+            top_sc, top_idx = flat.topk(k)
+            src_b  = (top_idx // V).clamp(max=seqs.size(0) - 1)
+            tok    = top_idx % V
+
+            new_seqs, new_scores = [], []
+            for sc, b, t in zip(top_sc.tolist(), src_b.tolist(), tok.tolist()):
+                if len(new_seqs) >= beam_size:
                     break
-                candidates: list = []
-                for ys, score in beams:
-                    tgt_mask = make_tgt_mask(ys, pad_idx=PAD_IDX)
-                    logits   = self.decode(memory, src_mask, ys, tgt_mask)
-                    log_probs = F.log_softmax(logits[:, -1, :], dim=-1)[0]
-                    topk_lp, topk_ids = log_probs.topk(beam_size)
-                    for lp, tok in zip(topk_lp.tolist(), topk_ids.tolist()):
-                        new_ys    = torch.cat([ys, torch.tensor([[tok]], device=device)], dim=1)
-                        new_score = score + lp
-                        if tok == EOS_IDX:
-                            finished.append((new_ys, new_score))
-                        else:
-                            candidates.append((new_ys, new_score))
+                new_seq = torch.cat(
+                    [seqs[b:b+1], torch.tensor([[t]], dtype=torch.long, device=device)],
+                    dim=1,
+                )
+                if t == EOS_IDX:
+                    length = new_seq.size(1) - 1
+                    finished.append((sc / max(1, length) ** alpha, new_seq))
+                else:
+                    new_seqs.append(new_seq)
+                    new_scores.append(sc)
 
-                def _norm(item: tuple) -> float:
-                    ys, sc = item
-                    return sc / max(1, (ys.size(1) - 1)) ** alpha
+            if not new_seqs:
+                break
 
-                candidates.sort(key=_norm, reverse=True)
-                beams = candidates[:beam_size]
+            nb     = len(new_seqs)
+            seqs   = torch.cat(new_seqs, dim=0)
+            scores = torch.tensor(new_scores, device=device)
+            mem    = memory.expand(nb, -1, -1).contiguous()
+            smask  = src_mask.expand(nb, -1, -1, -1).contiguous()
 
-        finished.extend(beams)
-        if not finished:
-            return init_ys
-        best_ys, _ = max(finished, key=lambda x: x[1] / max(1, (x[0].size(1) - 1)) ** alpha)
-        return best_ys
+            if len(finished) >= beam_size:
+                break
+
+        # Fold remaining live beams into finished pool
+        for i in range(seqs.size(0)):
+            length = seqs.size(1) - 1
+            finished.append((scores[i].item() / max(1, length) ** alpha, seqs[i:i+1]))
+
+        finished.sort(key=lambda x: x[0], reverse=True)
+        return finished[0][1]
 
     def infer(self, src_sentence: str) -> str:
         """
-        Translate a German sentence to English using beam search (beam=5).
+        Translate a German sentence to English using batched beam search (beam=4).
 
         Vocab and spaCy tokeniser are loaded automatically if not already set
         (required by the autograder which creates Transformer() with no args).
@@ -704,18 +732,11 @@ class Transformer(nn.Module):
 
         with torch.no_grad():
             memory = self.encode(src, src_mask)
-            ys = torch.tensor([[SOS_IDX]], dtype=torch.long, device=device)
-            for _ in range(50):
-                tgt_mask = make_tgt_mask(ys, pad_idx=PAD_IDX)
-                logits = self.decode(memory, src_mask, ys, tgt_mask)
-                next_tok = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                ys = torch.cat([ys, next_tok], dim=1)
-                if next_tok.item() == EOS_IDX:
-                    break
+            best = self._beam_decode(memory, src_mask, max_len=50, beam_size=4)
 
         out_tokens = [
             self.tgt_vocab.lookup_token(idx.item())
-            for idx in ys[0][1:]   # skip <sos>
+            for idx in best[0][1:]   # skip <sos>
         ]
         out_tokens = [t for t in out_tokens if t not in ("<eos>", "<pad>")]
         return " ".join(out_tokens)
