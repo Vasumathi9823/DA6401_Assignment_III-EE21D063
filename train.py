@@ -577,6 +577,7 @@ def _run_experiment(
         dropout=cfg["dropout"],
         use_scale=use_scale,
         use_learned_pe=use_learned_pe,
+        checkpoint_path=None,   # training: skip auto-download
     ).to(device)
 
     # Attach vocab/tokeniser for infer()

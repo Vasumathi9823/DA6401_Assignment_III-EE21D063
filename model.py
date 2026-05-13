@@ -456,6 +456,7 @@ class Transformer(nn.Module):
 
     # ── UPDATE this ID after uploading your trained checkpoint to Google Drive ──
     GDRIVE_FILE_ID: str = "1ZICakbwgqSBNftlYRyv9EiN4N9hslzrf"
+    _DEFAULT_CKPT: str = "best_checkpoint_A_main.pt"
 
     def __init__(
         self,
@@ -466,7 +467,7 @@ class Transformer(nn.Module):
         num_heads:      int   = 8,
         d_ff:           int   = 2048,
         dropout:        float = 0.1,
-        checkpoint_path: Optional[str] = None,
+        checkpoint_path: Optional[str] = "auto",
         use_scale:      bool  = True,
         use_learned_pe: bool  = False,
     ) -> None:
@@ -504,25 +505,48 @@ class Transformer(nn.Module):
         # Weight tying: share embedding and output projection (Vaswani et al. SS3.4)
         self.output_proj.weight = self.tgt_embed.weight
 
-        # ── Vocab/tokeniser placeholders (set by training script) ─────
+        # ── Vocab / tokeniser / checkpoint (all loaded eagerly per spec) ──
         self.src_vocab = None
         self.tgt_vocab = None
         self.src_spacy = None
 
-        # ── Load checkpoint from Google Drive (autograder hook) ───────
-        if checkpoint_path is not None:
-            if self.GDRIVE_FILE_ID == "1uAz5GYIqehcuGVrZ51Gv78xuawQqXSRO":
-                raise ValueError(
-                    "Set Transformer.GDRIVE_FILE_ID to your Drive file ID "
-                    "before the autograder can download the checkpoint."
+        # Resolve checkpoint path: "auto" = download from GDrive to default name
+        _ckpt_path = checkpoint_path
+        if _ckpt_path == "auto":
+            if self.GDRIVE_FILE_ID != "YOUR_GDRIVE_FILE_ID_HERE":
+                _ckpt_path = self._DEFAULT_CKPT
+                if not os.path.exists(_ckpt_path):
+                    gdown.download(id=self.GDRIVE_FILE_ID, output=_ckpt_path, quiet=False)
+            else:
+                _ckpt_path = None  # no real ID yet (pre-upload training)
+
+        if _ckpt_path is not None and os.path.exists(_ckpt_path):
+            _ckpt = torch.load(_ckpt_path, map_location="cpu", weights_only=False)
+            self.load_state_dict(_ckpt["model_state_dict"])
+            # Restore vocab so infer() works without re-building the dataset
+            if _ckpt.get("src_vocab") is not None:
+                from dataset import Vocab
+                self.src_vocab = Vocab.from_dict(_ckpt["src_vocab"])
+                self.tgt_vocab = Vocab.from_dict(_ckpt["tgt_vocab"])
+            # Load German spaCy tokeniser (with download fallback)
+            self.src_spacy = self._load_spacy_de()
+
+    @staticmethod
+    def _load_spacy_de():
+        """Load de_core_news_sm; download it silently if not installed."""
+        import spacy, sys
+        try:
+            return spacy.load("de_core_news_sm")
+        except OSError:
+            try:
+                import subprocess
+                subprocess.run(
+                    [sys.executable, "-m", "spacy", "download", "de_core_news_sm"],
+                    check=True, capture_output=True,
                 )
-            gdown.download(
-                id=self.GDRIVE_FILE_ID,
-                output=checkpoint_path,
-                quiet=False,
-            )
-            ckpt = torch.load(checkpoint_path, map_location="cpu")
-            self.load_state_dict(ckpt["model_state_dict"])
+                return spacy.load("de_core_news_sm")
+            except Exception:
+                return spacy.blank("de")
 
     def _init_weights(self) -> None:
         for p in self.parameters():
@@ -606,8 +630,7 @@ class Transformer(nn.Module):
             if self.src_spacy is None:
                 self.src_spacy = src_spacy
         if self.src_spacy is None:
-            import spacy
-            self.src_spacy = spacy.load("de_core_news_sm")
+            self.src_spacy = self._load_spacy_de()
 
     def _beam_decode(
         self,
