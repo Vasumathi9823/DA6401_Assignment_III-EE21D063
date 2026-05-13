@@ -456,7 +456,7 @@ class Transformer(nn.Module):
 
     # ── UPDATE this ID after uploading your trained checkpoint to Google Drive ──
     GDRIVE_FILE_ID: str = "1Q_Lw4QgtHtdAscfJi5ObHy8UdBX-OjAd"
-    _DEFAULT_CKPT: str = "best_3.pt"
+    _DEFAULT_CKPT: str = "best_checkpoint_A_main.pt"
 
     def __init__(
         self,
@@ -704,8 +704,14 @@ class Transformer(nn.Module):
 
         with torch.no_grad():
             memory = self.encode(src, src_mask)
-
-        ys = self._beam_decode(memory, src_mask, max_len=100, beam_size=5)
+            ys = torch.tensor([[SOS_IDX]], dtype=torch.long, device=device)
+            for _ in range(50):
+                tgt_mask = make_tgt_mask(ys, pad_idx=PAD_IDX)
+                logits = self.decode(memory, src_mask, ys, tgt_mask)
+                next_tok = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                ys = torch.cat([ys, next_tok], dim=1)
+                if next_tok.item() == EOS_IDX:
+                    break
 
         out_tokens = [
             self.tgt_vocab.lookup_token(idx.item())
