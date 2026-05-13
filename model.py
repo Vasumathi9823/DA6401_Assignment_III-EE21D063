@@ -513,7 +513,7 @@ class Transformer(nn.Module):
         # Resolve checkpoint path: "auto" = download from GDrive to default name
         _ckpt_path = checkpoint_path
         if _ckpt_path == "auto":
-            if self.GDRIVE_FILE_ID != "1Q_Lw4QgtHtdAscfJi5ObHy8UdBX-OjAd":
+            if self.GDRIVE_FILE_ID != "YOUR_GDRIVE_FILE_ID_HERE":
                 _ckpt_path = self._DEFAULT_CKPT
                 if not os.path.exists(_ckpt_path):
                     gdown.download(id=self.GDRIVE_FILE_ID, output=_ckpt_path, quiet=False)
