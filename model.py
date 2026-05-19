@@ -1,9 +1,15 @@
 """
-model.py — Transformer Architecture  (Version A: Post-LayerNorm)
+model.py — Transformer Architecture  (Version A: Pre-LayerNorm)
 DA6401 Assignment 3: "Attention Is All You Need"
 
-Architecture choice: Post-LayerNorm  x = LayerNorm(x + sublayer(x))
-as in the original Vaswani et al. (2017) paper.
+Architecture choice: Pre-LayerNorm  x = x + sublayer(LayerNorm(x))
+Pre-LN places the LayerNorm BEFORE each sub-layer (inside the residual branch).
+This is more training-stable than Post-LN on small datasets (Multi30k has only
+29 k sentence pairs) and consistently achieves higher BLEU in practice.
+Justification (for W&B report): Pre-LN eliminates the exploding-gradient problem
+in deep Post-LN networks because the residual path is always unscaled, making
+the effective learning-rate insensitive to depth.  See "On Layer Normalization in
+the Transformer Architecture" (Xiong et al., 2020).
 
 AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   ┌─────────────────────────────────────────────────────────────────┐
@@ -315,16 +321,17 @@ class PositionwiseFeedForward(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ENCODER LAYER  (Post-LayerNorm)
+#  ENCODER LAYER  (Pre-LayerNorm)
 # ══════════════════════════════════════════════════════════════════════
 
 class EncoderLayer(nn.Module):
     """
-    Single Transformer encoder sub-layer (Post-LN):
-        x → Self-Attention → Add & Norm → FFN → Add & Norm
+    Single Transformer encoder sub-layer (Pre-LN):
+        x → Norm → Self-Attention → Add → Norm → FFN → Add
 
-    Post-LN: LayerNorm is applied AFTER the residual addition, matching
-    the original Vaswani et al. (2017) paper exactly.
+    Pre-LN: LayerNorm is applied BEFORE each sub-layer (inside the residual
+    branch).  The residual stream is never passed through LayerNorm, keeping
+    gradient magnitudes stable throughout training.
     """
 
     def __init__(
@@ -343,22 +350,23 @@ class EncoderLayer(nn.Module):
         self.dropout   = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
-        # Post-LN: norm( x + sublayer(x) )
-        x = self.norm1(x + self.dropout(self.self_attn(x, x, x, src_mask)))
-        x = self.norm2(x + self.dropout(self.ffn(x)))
+        # Pre-LN: x + sublayer( norm(x) )
+        _x = self.norm1(x)
+        x  = x + self.dropout(self.self_attn(_x, _x, _x, src_mask))
+        x  = x + self.dropout(self.ffn(self.norm2(x)))
         return x
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  DECODER LAYER  (Post-LayerNorm)
+#  DECODER LAYER  (Pre-LayerNorm)
 # ══════════════════════════════════════════════════════════════════════
 
 class DecoderLayer(nn.Module):
     """
-    Single Transformer decoder sub-layer (Post-LN):
-        x → Masked Self-Attn → Add & Norm
-          → Cross-Attn(memory) → Add & Norm
-          → FFN → Add & Norm
+    Single Transformer decoder sub-layer (Pre-LN):
+        x → Norm → Masked Self-Attn → Add
+          → Norm → Cross-Attn(memory) → Add
+          → Norm → FFN → Add
     """
 
     def __init__(
@@ -385,12 +393,14 @@ class DecoderLayer(nn.Module):
         src_mask: torch.Tensor,
         tgt_mask: torch.Tensor,
     ) -> torch.Tensor:
-        # Masked self-attention (Post-LN)
-        x = self.norm1(x + self.dropout(self.self_attn(x, x, x, tgt_mask)))
-        # Cross-attention on encoder memory (Post-LN)
-        x = self.norm2(x + self.dropout(self.cross_attn(x, memory, memory, src_mask)))
-        # Feed-forward (Post-LN)
-        x = self.norm3(x + self.dropout(self.ffn(x)))
+        # Masked self-attention (Pre-LN)
+        _x = self.norm1(x)
+        x  = x + self.dropout(self.self_attn(_x, _x, _x, tgt_mask))
+        # Cross-attention on encoder memory (Pre-LN)
+        _x = self.norm2(x)
+        x  = x + self.dropout(self.cross_attn(_x, memory, memory, src_mask))
+        # Feed-forward (Pre-LN)
+        x  = x + self.dropout(self.ffn(self.norm3(x)))
         return x
 
 
@@ -439,6 +449,7 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
     """
     Full Encoder-Decoder Transformer for sequence-to-sequence tasks.
+    Architecture: Pre-LayerNorm (Xiong et al., 2020).
 
     Args:
         src_vocab_size  : Source vocabulary size.
@@ -455,7 +466,7 @@ class Transformer(nn.Module):
     """
 
     # ── UPDATE this ID after uploading your trained checkpoint to Google Drive ──
-    GDRIVE_FILE_ID: str = "1Q_Lw4QgtHtdAscfJi5ObHy8UdBX-OjAd"
+    GDRIVE_FILE_ID: str = "1ZICakbwgqSBNftlYRyv9EiN4N9hslzrf"
     _DEFAULT_CKPT: str = "best_checkpoint_A_main.pt"
 
     def __init__(
@@ -709,7 +720,7 @@ class Transformer(nn.Module):
 
     def infer(self, src_sentence: str) -> str:
         """
-        Translate a German sentence to English using batched beam search (beam=4).
+        Translate a German sentence to English using beam search (beam=5).
 
         Vocab and spaCy tokeniser are loaded automatically if not already set
         (required by the autograder which creates Transformer() with no args).
