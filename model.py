@@ -466,7 +466,7 @@ class Transformer(nn.Module):
     """
 
     # ── UPDATE this ID after uploading your trained checkpoint to Google Drive ──
-    GDRIVE_FILE_ID: str = "1Of1xyuBstuqh1_DJ_dDm8L1b8OzcDyoL"
+    GDRIVE_FILE_ID: str = "1rKTZ7ELt_P7KCT9DC5VhIHhhpV6QnaTX"
     _DEFAULT_CKPT: str = "best_checkpoint_A_main.pt"
 
     def __init__(
