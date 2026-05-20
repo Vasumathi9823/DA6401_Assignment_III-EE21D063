@@ -1,5 +1,5 @@
 # DA6401 - Assignment 3: Implementing the Transformer for Machine Translation
-## Version A — Post-LayerNorm (d_model=512, N=6)
+## Post-LayerNorm (d_model=512, N=6)
 
 ## Overview
 
@@ -59,8 +59,6 @@ wandb login
 ### Main experiment (autograder default — covers §2.1 Noam, §2.3, §2.5 LS baseline)
 ```bash
 python train.py
-# or explicitly:
-python train.py --experiment main
 ```
 
 ### Section 2.1 — Fixed LR comparison
@@ -88,36 +86,4 @@ python train.py --experiment no_smoothing
 python train.py --experiment all
 ```
 
-## After Training — Autograder Checkpoint Setup
-
-After running the main experiment, a checkpoint `best_checkpoint_A_main.pt` is saved.
-
-**Steps to enable autograder evaluation:**
-1. Upload `best_checkpoint_A_main.pt` to Google Drive
-2. Get the file's shareable link and extract the file ID
-   (e.g. `https://drive.google.com/file/d/FILE_ID_HERE/view`)
-3. Open `model.py` and replace:
-   ```python
-   GDRIVE_FILE_ID: str = "YOUR_GDRIVE_FILE_ID_HERE"
-   ```
-   with your actual file ID.
-4. Push updated `model.py` to GitHub.
-
-## W&B Experiments Summary
-
-| W&B Run Name              | Section | Description                        |
-|---------------------------|---------|------------------------------------|
-| `A_main_noam_ls01`        | §2.1, §2.5 | Main: Noam LR + label smooth 0.1 |
-| `A_attention_maps`        | §2.3    | Per-head attention heatmaps         |
-| `A_fixed_lr_1e4`          | §2.1    | Fixed LR = 1e-4 comparison          |
-| `A_no_attention_scale`    | §2.2    | No √d_k scaling + grad norm logging |
-| `A_with_attention_scale`  | §2.2    | With scaling baseline (5 epochs)    |
-| `A_learned_pe`            | §2.4    | Learned positional encoding         |
-| `A_sinusoidal_pe`         | §2.4    | Sinusoidal PE baseline              |
-| `A_no_label_smoothing`    | §2.5    | Standard cross-entropy              |
-
-## Notes
-
-- All data splits are strictly isolated (train vocab only; val/test reuse it).
-- The dataset downloads automatically from HuggingFace on first run.
-- GPU is detected automatically; CPU fallback is available.
+WandB report link: https://api.wandb.ai/links/ee21d063-iit-madras/8r9w398x 
